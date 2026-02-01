@@ -42,6 +42,14 @@ def build():
             print(f"Removing duplicate OpenMP runtime: {path}")
             os.remove(path)
 
+    # Ensure libiomp5md.dll exists in _internal root for torch/ctranslate2 to find
+    ct2_iomp = os.path.join(internal_dir, "ctranslate2", "libiomp5md.dll")
+    root_iomp = os.path.join(internal_dir, "libiomp5md.dll")
+    
+    if os.path.exists(ct2_iomp) and not os.path.exists(root_iomp):
+        print(f"Copying OpenMP runtime to root: {ct2_iomp} -> {root_iomp}")
+        shutil.copy2(ct2_iomp, root_iomp)
+
     print("Build output in dist/MeetingTranslator")
 
 if __name__ == "__main__":

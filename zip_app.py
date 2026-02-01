@@ -7,9 +7,11 @@ def zip_app():
     
     print(f"Zipping {source_dir} to {output_filename}.zip...")
     
-    shutil.make_archive(output_filename, 'zip', root_dir='dist', base_dir='MeetingTranslator')
+    archive_path = shutil.make_archive(output_filename, 'zip', root_dir='dist', base_dir='MeetingTranslator')
+    print(f"Zip created successfully at: {archive_path}")
     
-    print("Zip created successfully.")
+    print("Current directory contents:")
+    print(os.listdir('.'))
 
 if __name__ == "__main__":
     zip_app()
