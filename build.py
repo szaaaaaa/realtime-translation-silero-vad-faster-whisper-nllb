@@ -1,48 +1,51 @@
+"""
+PyInstaller 打包脚本
+注意：SeamlessM4T 模型很大，不建议打包进 exe
+建议：打包程序本身，模型在首次运行时自动下载到用户目录
+"""
 import PyInstaller.__main__
 import os
 import shutil
 
-def build():
-    # Clean previous build
-    if os.path.exists('dist'):
-        shutil.rmtree('dist')
-    if os.path.exists('build'):
-        shutil.rmtree('build')
 
-    print("Starting build process...")
+def build():
+    # 清理
+    for folder in ['dist', 'build']:
+        if os.path.exists(folder):
+            shutil.rmtree(folder)
+
+    print("开始打包...")
 
     PyInstaller.__main__.run([
         'main.py',
-        '--name=MeetingTranslator',
-        '--console',  # 临时启用控制台以便调试
+        '--name=SeamlessTranslator',
+        '--windowed',
         '--onedir',
         '--clean',
-        '--collect-all=faster_whisper',
-        '--collect-all=ctranslate2',
-        '--collect-all=tokenizers',
-        '--exclude-module=torch',
-        '--paths=.', 
+
+        # 收集依赖
+        '--collect-all=transformers',
+        '--collect-all=torch',
+        '--collect-all=torchaudio',
+        '--collect-all=sounddevice',
+        '--collect-all=sentencepiece',
+
+        # 隐藏导入
+        '--hidden-import=PyQt6',
+        '--hidden-import=numpy',
+
+        # 路径
+        '--paths=.',
+
+        # 排除不需要的模块
+        '--exclude-module=matplotlib',
+        '--exclude-module=PIL',
+        '--exclude-module=tkinter',
     ])
 
-    print("PyInstaller build complete.")
+    print("打包完成！")
+    print("注意：首次运行时会自动下载 SeamlessM4T 模型（约 10GB）")
 
-    dist_dir = os.path.join("dist", "MeetingTranslator")
-    internal_dir = os.path.join(dist_dir, "_internal")
-
-    # Post-processing: fix OpenMP DLL conflict
-    # Only keep ONE copy of libiomp5md.dll in _internal root
-    ct2_iomp = os.path.join(internal_dir, "ctranslate2", "libiomp5md.dll")
-    root_iomp = os.path.join(internal_dir, "libiomp5md.dll")
-
-    if os.path.exists(ct2_iomp):
-        if not os.path.exists(root_iomp):
-            print(f"Copying OpenMP runtime to root: {ct2_iomp} -> {root_iomp}")
-            shutil.copy2(ct2_iomp, root_iomp)
-        # Remove the duplicate to avoid DLL conflicts
-        print(f"Removing duplicate OpenMP DLL: {ct2_iomp}")
-        os.remove(ct2_iomp)
-
-    print("Build output in dist/MeetingTranslator")
 
 if __name__ == "__main__":
     build()

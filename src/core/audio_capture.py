@@ -1,154 +1,110 @@
+"""
+音频采集模块 - 使用 sounddevice 采集系统音频
+"""
 import sounddevice as sd
 import numpy as np
+from typing import Generator, Optional, List, Dict
 import queue
-import threading
-import sys
+
 
 class AudioCapture:
-    def __init__(self, device_index=None, sample_rate=16000, channels=1):
-        self.device_index = device_index
+    """音频采集类，支持系统回环和麦克风输入"""
+
+    def __init__(self, sample_rate: int = 16000, channels: int = 1,
+                 chunk_duration: float = 0.5):
+        """
+        初始化音频采集器
+
+        Args:
+            sample_rate: 采样率，SeamlessM4T 要求 16000Hz
+            channels: 声道数，单声道
+            chunk_duration: 每个音频块的时长（秒）
+        """
         self.sample_rate = sample_rate
         self.channels = channels
-        self.audio_queue = queue.Queue()
-        self.is_running = False
-        self.stream = None
-        self._lock = threading.Lock()
+        self.chunk_duration = chunk_duration
+        self.chunk_size = int(sample_rate * chunk_duration)
 
-    def list_devices(self):
-        """List all available input devices, highlighting loopback ones."""
-        devices = sd.query_devices()
-        input_devices = []
-        host_apis = sd.query_hostapis()
-        
-        for i, dev in enumerate(devices):
-            # We are interested in input devices (max_input_channels > 0)
-            # On Windows WASAPI, loopback devices appear as input devices.
+        self.device_index: Optional[int] = None
+        self.stream: Optional[sd.InputStream] = None
+        self.audio_queue: queue.Queue = queue.Queue()
+        self.is_running = False
+
+    def list_devices(self) -> List[Dict]:
+        """列出所有可用的音频输入设备"""
+        devices = []
+        for i, dev in enumerate(sd.query_devices()):
             if dev['max_input_channels'] > 0:
-                api_name = host_apis[dev['hostapi']]['name']
-                is_loopback = False
-                
-                # Heuristic for Windows WASAPI loopback
-                if 'WASAPI' in api_name:
-                    # Often loopback devices don't have explicit "loopback" in name in some sd versions,
-                    # but usually user can identify them by name (e.g. "Speakers (Realtek...)")
-                    # However, purely "Speakers" is usually output. 
-                    # If it shows as input, it might be a mic or loopback.
-                    pass
-                
-                input_devices.append({
+                devices.append({
                     'index': i,
                     'name': dev['name'],
-                    'hostapi': api_name,
-                    'channels': dev['max_input_channels']
+                    'channels': dev['max_input_channels'],
+                    'sample_rate': dev['default_samplerate'],
+                    'hostapi': sd.query_hostapis(dev['hostapi'])['name']
                 })
-        return input_devices
+        return devices
 
-    def find_default_loopback_device(self):
-        """Try to find a default loopback device on Windows WASAPI."""
-        if sys.platform != 'win32':
-            return None # Loopback is tricky on other platforms without specific setup
-            
-        devices = sd.query_devices()
-        host_apis = sd.query_hostapis()
-        
-        # 1. Look for WASAPI host API
-        wasapi_index = -1
-        for i, api in enumerate(host_apis):
-            if 'WASAPI' in api['name']:
-                wasapi_index = i
-                break
-        
-        if wasapi_index == -1:
-            return None
-            
-        # 2. Find the default output device for WASAPI
-        default_output = host_apis[wasapi_index]['default_output_device']
-        if default_output < 0:
-            return None
-            
-        # 3. In sounddevice with WASAPI, the loopback device for a given output 
-        # is often just the output device itself opened as an input stream?
-        # Actually, sounddevice documentation says: 
-        # "On Windows, 'WASAPI' devices support loopback mode if they are opened as input devices."
-        # So we just need the index of the default OUTPUT device, but use it as INPUT.
-        return default_output
-
-    def _callback(self, indata, frames, time, status):
+    def _audio_callback(self, indata, frames, time, status):
+        """音频流回调函数"""
         if status:
-            print(f"Audio callback status: {status}", file=sys.stderr)
-        if self.is_running:
-            self.audio_queue.put(indata.copy())
+            print(f"Audio status: {status}")
+        # 转换为 float32 并放入队列
+        audio_data = indata.copy().astype(np.float32)
+        if self.channels == 1 and audio_data.ndim > 1:
+            audio_data = audio_data.mean(axis=1)
+        self.audio_queue.put(audio_data)
 
     def start(self):
+        """开始音频采集"""
         if self.is_running:
             return
 
-        with self._lock:
-            try:
-                if self.device_index is None:
-                    # Try to auto-detect loopback on Windows
-                    self.device_index = self.find_default_loopback_device()
-                    if self.device_index is not None:
-                         print(f"Auto-selected device index {self.device_index} for loopback.")
-                
-                # Check if device supports input
-                if self.device_index is not None:
-                     dev_info = sd.query_devices(self.device_index)
-                     # Special case for WASAPI loopback: we open an OUTPUT device as INPUT.
-                     # So we don't strictly check max_input_channels if it's WASAPI
-                     pass
+        self.is_running = True
+        self.audio_queue = queue.Queue()
 
-                self.is_running = True
-                self.stream = sd.InputStream(
-                    device=self.device_index,
-                    channels=self.channels,
-                    samplerate=self.sample_rate,
-                    callback=self._callback,
-                    dtype=np.float32,
-                    blocksize=int(self.sample_rate * 0.5) # 0.5s blocks
-                )
-                self.stream.start()
-                print("Audio capture started.")
-            except Exception as e:
-                print(f"Failed to start audio capture: {e}")
-                self.is_running = False
-                raise e
+        # 获取设备的原生采样率
+        if self.device_index is not None:
+            device_info = sd.query_devices(self.device_index)
+            native_sr = int(device_info['default_samplerate'])
+        else:
+            native_sr = self.sample_rate
+
+        self.stream = sd.InputStream(
+            device=self.device_index,
+            samplerate=native_sr,
+            channels=self.channels,
+            dtype=np.float32,
+            blocksize=int(native_sr * self.chunk_duration),
+            callback=self._audio_callback
+        )
+        self.stream.start()
 
     def stop(self):
-        if not self.is_running:
-            return
-            
-        with self._lock:
-            self.is_running = False
-            if self.stream:
-                self.stream.stop()
-                self.stream.close()
-                self.stream = None
-            # Clear queue
-            while not self.audio_queue.empty():
-                try:
-                    self.audio_queue.get_nowait()
-                except queue.Empty:
-                    break
-            print("Audio capture stopped.")
+        """停止音频采集"""
+        self.is_running = False
+        if self.stream:
+            self.stream.stop()
+            self.stream.close()
+            self.stream = None
 
-    def get_data(self):
-        """Generator that yields audio chunks."""
+    def get_audio_chunk(self, timeout: float = 1.0) -> Optional[np.ndarray]:
+        """
+        获取一个音频块
+
+        Args:
+            timeout: 超时时间（秒）
+
+        Returns:
+            音频数据 numpy 数组，如果超时返回 None
+        """
+        try:
+            return self.audio_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def get_audio_generator(self) -> Generator[np.ndarray, None, None]:
+        """返回音频数据生成器"""
         while self.is_running:
-            try:
-                yield self.audio_queue.get(timeout=1)
-            except queue.Empty:
-                continue
-
-if __name__ == "__main__":
-    # Test script
-    capture = AudioCapture()
-    print("Available Devices:")
-    for dev in capture.list_devices():
-        print(f"Index {dev['index']}: {dev['name']} ({dev['hostapi']})")
-    
-    # Attempt to start (might fail if no loopback found/selected)
-    # capture.start()
-    # import time
-    # time.sleep(2)
-    # capture.stop()
+            chunk = self.get_audio_chunk()
+            if chunk is not None:
+                yield chunk
