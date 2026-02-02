@@ -63,9 +63,9 @@ class SubtitleWindow(QMainWindow):
         self.translated_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
     def update_text(self, original, translated):
-        if original:
+        if original is not None:
             self.original_label.setText(original)
-        if translated:
+        if translated is not None:
             self.translated_label.setText(translated)
 
     def mousePressEvent(self, event):

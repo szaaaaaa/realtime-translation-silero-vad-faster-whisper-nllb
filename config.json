@@ -1,0 +1,20 @@
+{
+    "audio": {
+        "device_index": 1,
+        "sample_rate": 16000
+    },
+    "translation": {
+        "source_lang": "auto",
+        "target_lang": "zh-CN"
+    },
+    "display": {
+        "opacity": 0.64,
+        "font_size": 12,
+        "show_original": true
+    },
+    "model": {
+        "name": "facebook/seamless-m4t-v2-large",
+        "device": "cuda",
+        "dtype": "float16"
+    }
+}

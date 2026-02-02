@@ -104,7 +104,7 @@ python main.py
 
 ### 首次运行
 
-首次运行时，程序会自动下载 SeamlessM4T v2 模型（约 10GB），请确保网络连接稳定。模型会缓存到 `~/.cache/huggingface/` 目录。
+首次运行时，程序会自动下载 SeamlessM4T v2 模型（约 10GB），请确保网络连接稳定。默认缓存目录在 C 盘用户目录（`C:/Users/<你的用户名>/.cache/huggingface/`），可通过环境变量将缓存路径改到 D 盘（例如 `D:/hf_cache`）。
 
 ### 界面说明
 

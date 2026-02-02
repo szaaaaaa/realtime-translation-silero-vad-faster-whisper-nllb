@@ -21,6 +21,8 @@ class AudioCapture:
             chunk_duration: 每个音频块的时长（秒）
         """
         self.sample_rate = sample_rate
+        # Actual capture sample rate (may differ from model sample rate)
+        self.current_sample_rate = sample_rate
         self.channels = channels
         self.chunk_duration = chunk_duration
         self.chunk_size = int(sample_rate * chunk_duration)
@@ -66,15 +68,16 @@ class AudioCapture:
         if self.device_index is not None:
             device_info = sd.query_devices(self.device_index)
             native_sr = int(device_info['default_samplerate'])
+            self.current_sample_rate = native_sr
         else:
-            native_sr = self.sample_rate
+            self.current_sample_rate = self.sample_rate
 
         self.stream = sd.InputStream(
             device=self.device_index,
-            samplerate=native_sr,
+            samplerate=self.current_sample_rate,
             channels=self.channels,
             dtype=np.float32,
-            blocksize=int(native_sr * self.chunk_duration),
+            blocksize=int(self.current_sample_rate * self.chunk_duration),
             callback=self._audio_callback
         )
         self.stream.start()

@@ -46,10 +46,16 @@ class TranslationWorker(QThread):
         self.cm = config_manager
         self.is_running = False
 
-        self.silence_threshold = 0.01
-        self.min_duration = 2.0
-        self.max_duration = 10.0
-        self.silence_duration = 0.5
+        # VAD tuning for lower latency and fewer hallucinations
+        self.silence_threshold = 0.015
+        self.min_duration = 1.0
+        self.max_duration = 6.0
+        self.silence_duration = 0.3
+        self.min_speech_duration = 0.3
+        self.clear_after_silence = 1.5
+        self.last_speech_time = 0.0
+        self.last_translation_time = 0.0
+        self.subtitles_visible = False
 
     def run(self):
         self.is_running = True
@@ -68,7 +74,8 @@ class TranslationWorker(QThread):
             audio_buffer = []
             current_duration = 0.0
             silence_counter = 0.0
-            sample_rate = self.audio_capture.sample_rate
+            speech_duration = 0.0
+            sample_rate = self.audio_capture.current_sample_rate
 
             while self.is_running:
                 chunk = self.audio_capture.get_audio_chunk(timeout=0.5)
@@ -84,6 +91,8 @@ class TranslationWorker(QThread):
                     silence_counter += chunk_duration
                 else:
                     silence_counter = 0.0
+                    speech_duration += chunk_duration
+                    self.last_speech_time = time.time()
 
                 should_translate = False
                 if current_duration > self.min_duration and silence_counter > self.silence_duration:
@@ -92,6 +101,15 @@ class TranslationWorker(QThread):
                     should_translate = True
 
                 if should_translate and audio_buffer:
+                    if speech_duration < self.min_speech_duration:
+                        # Treat as silence/noise: clear buffer and subtitles
+                        audio_buffer = []
+                        current_duration = 0.0
+                        silence_counter = 0.0
+                        speech_duration = 0.0
+                        self.status_updated.emit("????...")
+                        continue
+
                     full_audio = np.concatenate(audio_buffer, axis=0)
                     full_audio = full_audio.flatten()
 
@@ -107,6 +125,8 @@ class TranslationWorker(QThread):
 
                         if translated.strip():
                             self.text_updated.emit(original, translated)
+                            self.subtitles_visible = True
+                            self.last_translation_time = time.time()
 
                     except Exception as e:
                         self.status_updated.emit(f"翻译错误: {str(e)}")
@@ -114,6 +134,7 @@ class TranslationWorker(QThread):
                     audio_buffer = []
                     current_duration = 0.0
                     silence_counter = 0.0
+                    speech_duration = 0.0
                     self.status_updated.emit("正在监听...")
 
         except Exception as e:
@@ -138,7 +159,7 @@ class MainWindow(QMainWindow):
         self.resize(450, 650)
 
         self.cm = ConfigManager()
-        self.audio_capture = AudioCapture()
+        self.audio_capture = AudioCapture(chunk_duration=0.25)
         self.translator = SeamlessTranslator(device="cuda", use_8bit=True)
 
         self.subtitle_window = SubtitleWindow(self.cm.config.get("display", {}))

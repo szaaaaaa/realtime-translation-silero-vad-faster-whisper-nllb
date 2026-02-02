@@ -180,7 +180,7 @@ class SeamlessTranslator:
         tgt_lang_code = TARGET_LANGUAGE_CODES.get(target_lang, target_lang)
 
         audio_inputs = self.processor(
-            audios=audio,
+            audio=audio,
             sampling_rate=self.sample_rate,
             return_tensors="pt"
         )
@@ -192,7 +192,7 @@ class SeamlessTranslator:
                 **audio_inputs,
                 tgt_lang=tgt_lang_code,
                 generate_speech=False,
-                num_beams=5,
+                num_beams=1,
                 do_sample=False,
             )
 
@@ -208,7 +208,7 @@ class SeamlessTranslator:
                         **audio_inputs,
                         tgt_lang=src_lang_code if src_lang_code else "eng",
                         generate_speech=False,
-                        num_beams=5,
+                        num_beams=1,
                         do_sample=False,
                     )
                     original_text = self.processor.batch_decode(
@@ -245,7 +245,7 @@ class SeamlessTranslator:
         lang_code = LANGUAGE_CODES.get(language, language)
 
         audio_inputs = self.processor(
-            audios=audio.astype(np.float32),
+            audio=audio.astype(np.float32),
             sampling_rate=self.sample_rate,
             return_tensors="pt"
         )
@@ -256,7 +256,7 @@ class SeamlessTranslator:
                 **audio_inputs,
                 tgt_lang=lang_code,
                 generate_speech=False,
-                num_beams=5,
+                num_beams=1,
             )
             text = self.processor.batch_decode(
                 output_tokens[0],
