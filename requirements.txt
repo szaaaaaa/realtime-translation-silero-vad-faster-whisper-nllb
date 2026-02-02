@@ -1,6 +1,24 @@
-PyQt6
+# PyTorch with CUDA support
+# RTX 50 系列 (Blackwell/SM_120): cu128
+# RTX 40/30 系列: cu121 或 cu124
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch>=2.6.0
+torchaudio>=2.6.0
+
+# HuggingFace Transformers
+transformers>=4.36.0
+sentencepiece
+accelerate
+
+# 8-bit 量化支持（8GB 显存必需）
+bitsandbytes>=0.41.0
+
+# Audio
 sounddevice
 numpy
-faster-whisper
-deep-translator
+
+# UI
+PyQt6
+
+# Packaging (optional)
 pyinstaller
