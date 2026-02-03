@@ -13,10 +13,11 @@ from src.events import ASRChunk, ASRResult
 logger = logging.getLogger(__name__)
 
 
-class ASRWorker(threading.Thread):
+class ASRWorker:
     """
     ASR 工作线程
     使用 faster-whisper 进行语音识别
+    不继承 threading.Thread，内部管理线程实例以支持重复 start/stop
     """
 
     def __init__(self,
@@ -37,7 +38,6 @@ class ASRWorker(threading.Thread):
             device: 运行设备 (cuda, cpu)
             compute_type: 计算精度 (float16, int8, float32)
         """
-        super().__init__(daemon=True)
         self.input_queue = input_queue
         self.output_queue = output_queue
         self.model_size = model_size
@@ -47,6 +47,7 @@ class ASRWorker(threading.Thread):
 
         self._model = None
         self._running = False
+        self._thread: Optional[threading.Thread] = None
         self._error_count = 0
         self._max_errors = 5
 
@@ -85,13 +86,21 @@ class ASRWorker(threading.Thread):
             else:
                 raise
 
-    def run(self) -> None:
+    def start(self) -> None:
+        """启动工作线程（每次创建新的 Thread 实例）"""
+        if self._thread is not None and self._thread.is_alive():
+            logger.warning("ASR Worker 已在运行")
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
         """工作线程主循环"""
         if self._model is None:
             logger.error("ASR 模型未加载")
             return
 
-        self._running = True
         logger.info("ASR Worker 已启动")
 
         while self._running:
@@ -200,8 +209,11 @@ class ASRWorker(threading.Thread):
     def stop(self) -> None:
         """停止工作线程"""
         self._running = False
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self._thread = None
 
     @property
     def is_running(self) -> bool:
         """是否正在运行"""
-        return self._running
+        return self._running and self._thread is not None and self._thread.is_alive()

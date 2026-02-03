@@ -41,10 +41,11 @@ class LRUCache:
         return len(self._cache)
 
 
-class MTWorker(threading.Thread):
+class MTWorker:
     """
     MT 工作线程
     使用 NLLB 进行文本翻译
+    不继承 threading.Thread，内部管理线程实例以支持重复 start/stop
     """
 
     def __init__(self,
@@ -67,7 +68,6 @@ class MTWorker(threading.Thread):
             device: 运行设备 (cuda, cpu)
             cache_size: 缓存大小
         """
-        super().__init__(daemon=True)
         self.input_queue = input_queue
         self.output_queue = output_queue
         self.model_name = model_name
@@ -80,6 +80,7 @@ class MTWorker(threading.Thread):
         self._tokenizer = None
         self._cache = LRUCache(cache_size)
         self._running = False
+        self._thread: Optional[threading.Thread] = None
         self._error_count = 0
         self._max_errors = 3
 
@@ -112,13 +113,21 @@ class MTWorker(threading.Thread):
             logger.error(f"加载 NLLB 模型失败: {e}")
             raise
 
-    def run(self) -> None:
+    def start(self) -> None:
+        """启动工作线程（每次创建新的 Thread 实例）"""
+        if self._thread is not None and self._thread.is_alive():
+            logger.warning("MT Worker 已在运行")
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
         """工作线程主循环"""
         if self._model is None:
             logger.error("MT 模型未加载")
             return
 
-        self._running = True
         logger.info("MT Worker 已启动")
 
         while self._running:
@@ -239,11 +248,14 @@ class MTWorker(threading.Thread):
     def stop(self) -> None:
         """停止工作线程"""
         self._running = False
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self._thread = None
 
     @property
     def is_running(self) -> bool:
         """是否正在运行"""
-        return self._running
+        return self._running and self._thread is not None and self._thread.is_alive()
 
     @property
     def cache_size_used(self) -> int:

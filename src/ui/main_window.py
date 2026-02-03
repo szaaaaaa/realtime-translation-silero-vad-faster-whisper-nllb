@@ -193,6 +193,7 @@ class MainWindow(QMainWindow):
 
         self.worker = None
         self.model_loader = None
+        self._is_translating = False
 
         self.load_models()
 
@@ -414,21 +415,15 @@ class MainWindow(QMainWindow):
 
     def toggle_translation(self):
         """切换翻译状态"""
-        if self.worker and self.worker.isRunning():
-            self.worker.stop()
-            self.worker.wait()
-            self.btn_start.setText("开始翻译")
-            self.btn_start.setStyleSheet(
-                "background-color: #38A169; color: white; "
-                "font-weight: bold; padding: 10px;"
-            )
+        if self._is_translating:
+            # 停止翻译
+            if self.worker:
+                self.worker.stop()
+                self.worker.wait()
+            self._on_translation_stopped()
             self.log("翻译已停止")
-
-            # 重置组件
-            self.vad.reset()
-            self.chunker.reset()
-            self.text_stabilizer.reset()
         else:
+            # 开始翻译
             self.worker = PipelineWorker(
                 self.audio_capture,
                 self.vad,
@@ -441,14 +436,34 @@ class MainWindow(QMainWindow):
             self.worker.text_updated.connect(self.subtitle_window.update_subtitle)
             self.worker.status_updated.connect(self.log)
             self.worker.error_occurred.connect(lambda e: self.log(f"错误: {e}"))
+            self.worker.finished.connect(self._on_worker_finished)
             self.worker.start()
 
+            self._is_translating = True
             self.btn_start.setText("停止翻译")
             self.btn_start.setStyleSheet(
                 "background-color: #E53E3E; color: white; "
                 "font-weight: bold; padding: 10px;"
             )
             self.log("翻译已开始")
+
+    def _on_worker_finished(self):
+        """PipelineWorker 线程结束时的回调（包括异常退出）"""
+        if self._is_translating:
+            self._on_translation_stopped()
+
+    def _on_translation_stopped(self):
+        """重置 UI 到停止状态"""
+        self._is_translating = False
+        self.btn_start.setText("开始翻译")
+        self.btn_start.setStyleSheet(
+            "background-color: #38A169; color: white; "
+            "font-weight: bold; padding: 10px;"
+        )
+        # 重置组件
+        self.vad.reset()
+        self.chunker.reset()
+        self.text_stabilizer.reset()
 
     def log(self, message: str):
         """添加日志"""
@@ -459,7 +474,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """窗口关闭事件"""
-        if self.worker and self.worker.isRunning():
+        if self._is_translating and self.worker:
             self.worker.stop()
             self.worker.wait()
         self.subtitle_window.close()
