@@ -1,162 +1,174 @@
-# Seamless 实时翻译
+# 低延迟流式翻译
 
-基于 Meta SeamlessM4T v2 的端到端实时语音翻译应用。支持 100+ 种语言的语音识别和翻译，无需依赖第三方翻译 API。
+基于 faster-whisper + NLLB 的实时低延迟语音翻译应用。采用流式管道架构，支持系统内录和麦克风输入，端到端延迟目标 < 2 秒。
 
-## 功能特点
+## 架构
 
-- **端到端翻译**：使用 SeamlessM4T v2 模型，直接从语音翻译到目标语言文本
-- **实时字幕**：悬浮字幕窗口，支持自定义透明度和字体大小
-- **多语言支持**：支持 100+ 种语言输入，主流语言输出
-- **本地运行**：所有处理在本地完成，无需网络连接（首次需下载模型）
-- **8-bit 量化**：支持 8GB 显存显卡运行
+```
+Audio Capture → Silero VAD → Chunker → faster-whisper ASR →
+Text Stabilizer → NLLB MT → 双语字幕浮窗
+```
+
+5 个线程通过有界队列通信，互不阻塞：
+
+| 线程 | 职责 |
+|-----|------|
+| Audio Capture | WASAPI/麦克风采集，20ms 帧 |
+| VAD + Chunker | 语音检测 + 1s 分块 |
+| ASR Worker | faster-whisper 语音识别 |
+| MT Worker | NLLB 文本翻译（仅 final） |
+| UI Main Thread | PyQt6 字幕渲染 |
 
 ## 系统要求
 
-### 硬件要求
-
-| 配置 | 最低要求 | 推荐配置 |
+| 组件 | 最低配置 | 推荐配置 |
 |------|---------|---------|
-| GPU | NVIDIA 8GB 显存 | NVIDIA 12GB+ 显存 |
-| 内存 | 16GB | 32GB |
-| 存储 | 15GB 可用空间 | 20GB+ 可用空间 |
+| GPU | GTX 1060 6GB | RTX 3060 12GB |
+| CPU | Intel i5-8th | Intel i7-10th |
+| 内存 | 8GB | 16GB |
+| 存储 | 5GB | 10GB |
 
-**支持的显卡**：
-- RTX 50 系列 (5070/5080/5090) - 需要 CUDA 12.8+
-- RTX 40 系列 (4060/4070/4080/4090)
-- RTX 30 系列 (3060/3070/3080/3090)
-
-### 软件要求
-
-- Windows 10/11 或 Linux
+- Windows 10/11（优先）或 Linux
 - Python 3.10+
-- NVIDIA 驱动程序（最新版本）
-- CUDA Toolkit（根据显卡型号选择版本）
+- NVIDIA 驱动程序（GPU 加速需要）
 
-## 安装指南
+## 安装
 
-### 1. 安装 NVIDIA 驱动和 CUDA
-
-确保已安装最新的 NVIDIA 驱动程序。根据显卡型号选择 CUDA 版本：
-
-| 显卡系列 | CUDA 版本 |
-|---------|----------|
-| RTX 50 系列 | CUDA 12.8+ |
-| RTX 40/30 系列 | CUDA 12.1+ |
-
-### 2. 创建虚拟环境
+### 1. 创建虚拟环境
 
 ```bash
-# 创建虚拟环境
 python -m venv venv
 
-# 激活虚拟环境
-# Windows:
+# Windows
 venv\Scripts\activate
-# Linux:
+# Linux
 source venv/bin/activate
 ```
 
-### 3. 安装 PyTorch
+### 2. 安装 PyTorch
 
-根据显卡型号选择安装命令：
-
-**RTX 50 系列 (Blackwell)**：
-```bash
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
-```
-
-**RTX 40/30 系列**：
-```bash
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-```
-
-### 4. 安装其他依赖
+根据显卡选择：
 
 ```bash
-pip install transformers accelerate sentencepiece sounddevice PyQt6 numpy
+# RTX 40/30 系列
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# RTX 50 系列 (Blackwell)
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+# 无 GPU
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
-### 5. 安装 8-bit 量化支持（8GB 显存必需）
+### 3. 安装依赖
 
 ```bash
-# Windows
-pip install bitsandbytes>=0.43.0
-
-# 如果上面失败，使用预编译版本
-pip install https://github.com/jllllll/bitsandbytes-windows-webui/releases/download/wheels/bitsandbytes-0.43.0-py3-none-win_amd64.whl
+pip install -r requirements.txt
 ```
 
-### 6. 验证安装
+### 4. 验证
 
 ```python
 import torch
-print(f"CUDA 可用: {torch.cuda.is_available()}")
-print(f"显卡: {torch.cuda.get_device_name(0)}")
+print(f"CUDA: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
 ```
 
-## 使用方法
-
-### 启动应用
+## 使用
 
 ```bash
 python main.py
 ```
 
-### 首次运行
+首次运行会自动下载模型：
+- Silero VAD（~2MB）
+- faster-whisper small（~500MB）
+- NLLB-200-distilled-600M（~1.2GB）
 
-首次运行时，程序会自动下载 SeamlessM4T v2 模型（约 10GB），请确保网络连接稳定。默认缓存目录在 C 盘用户目录（`C:/Users/<你的用户名>/.cache/huggingface/`），可通过环境变量将缓存路径改到 D 盘（例如 `D:/hf_cache`）。
+### 界面操作
 
-### 界面说明
+1. 等待模型加载完成（状态栏显示进度）
+2. 选择音频输入设备
+3. 点击「开始翻译」
+4. 字幕浮窗自动显示双语字幕
 
-1. **模型状态**：显示模型加载进度和状态
-2. **控制**：开始/停止翻译按钮
-3. **音频源**：选择音频输入设备（麦克风或系统回环）
-4. **语言**：
-   - 源语言：选择输入音频的语言（auto 为自动检测）
-   - 目标语言：选择翻译输出的语言
-5. **外观**：调整字幕窗口的透明度和字体大小
-6. **日志**：显示运行状态和错误信息
+### 字幕浮窗
 
-### 字幕窗口
+- 拖拽移动位置
+- 双击切换鼠标穿透模式
+- 上方灰色文字：原文（含 partial 实时预览）
+- 下方白色文字：译文（final 结果）
 
-- 字幕窗口会悬浮在所有窗口上方
-- 可以拖拽移动位置
-- 上方显示原文，下方显示翻译
+## 配置
 
-## 配置文件
+编辑 `config.yaml` 调整参数：
 
-配置保存在 `config.json`，包含以下设置：
+```yaml
+# 音频设置
+audio:
+  input_mode: loopback  # loopback（系统内录） | mic（麦克风）
+  device_index: null    # null 为自动选择，填数字指定设备
 
-```json
-{
-    "audio": {
-        "device_index": null,
-        "sample_rate": 16000
-    },
-    "translation": {
-        "source_lang": "auto",
-        "target_lang": "zh-CN"
-    },
-    "display": {
-        "opacity": 0.7,
-        "font_size": 24,
-        "show_original": true
-    },
-    "model": {
-        "name": "facebook/seamless-m4t-v2-large",
-        "device": "cuda",
-        "dtype": "float16"
-    }
-}
+# VAD 设置
+vad:
+  threshold: 0.50       # 语音检测阈值（0-1）
+  speech_start_frames: 6   # 连续几帧判定语音开始
+  speech_end_frames: 10    # 连续几帧判定语音结束
+
+# ASR 设置
+asr:
+  model_size: small     # tiny | base | small | medium
+  language: en          # 识别语言
+  device: cuda          # cuda | cpu
+  compute_type: float16 # float16（GPU） | int8（CPU）
+
+# MT 设置
+mt:
+  model_name: facebook/nllb-200-distilled-600M
+  src_lang: eng_Latn    # 源语言
+  tgt_lang: zho_Hans    # 目标语言
+  cache_size: 2048      # 翻译缓存大小
+
+# UI 设置
+ui:
+  font_size: 24
+  opacity: 0.8
 ```
 
-## 支持的语言
+## 项目结构
 
-### 源语言（语音输入）
+```
+src/
+├── core/
+│   ├── audio_capture.py      # 音频采集（WASAPI/麦克风）
+│   ├── ring_buffer.py        # 环形缓冲区
+│   ├── vad.py                # 语音活动检测（Silero VAD）
+│   ├── chunker.py            # 音频分块器
+│   ├── asr_worker.py         # ASR 工作线程（faster-whisper）
+│   ├── text_stabilizer.py    # 文本稳定器（LCP 算法）
+│   ├── mt_worker.py          # 翻译工作线程（NLLB）
+│   ├── config_manager.py     # 配置管理
+│   └── latency_logger.py     # 延迟打点日志
+├── ui/
+│   ├── main_window.py        # 主控制窗口
+│   └── subtitle_window.py    # 字幕浮窗
+├── events/
+│   └── events.py             # 事件数据类定义
+├── queues/
+│   └── __init__.py
+└── utils/
+    └── __init__.py
+main.py                       # 入口文件
+config.yaml                   # 配置文件
+```
+
+## 语言代码
+
+### ASR (Whisper)
 
 | 代码 | 语言 |
 |-----|------|
-| auto | 自动检测 |
 | en | 英语 |
 | zh | 中文 |
 | ja | 日语 |
@@ -164,100 +176,59 @@ python main.py
 | es | 西班牙语 |
 | fr | 法语 |
 | de | 德语 |
-| ru | 俄语 |
 
-### 目标语言（翻译输出）
+### MT (NLLB)
 
 | 代码 | 语言 |
 |-----|------|
-| zh-CN | 简体中文 |
-| zh-TW | 繁体中文 |
-| en | 英语 |
-| ja | 日语 |
-| ko | 韩语 |
-| es | 西班牙语 |
-| fr | 法语 |
-| de | 德语 |
-| ru | 俄语 |
+| eng_Latn | 英语 |
+| zho_Hans | 简体中文 |
+| zho_Hant | 繁体中文 |
+| jpn_Jpan | 日语 |
+| kor_Hang | 韩语 |
+| spa_Latn | 西班牙语 |
+| fra_Latn | 法语 |
+| deu_Latn | 德语 |
 
-## 打包发布
+## 延迟分解
 
-使用 PyInstaller 打包：
+```
+总延迟 < 2000ms
 
-```bash
-python build.py
+├── 音频采集      ~20ms
+├── VAD 判定      ~120ms
+├── Chunk 累积    ~1000ms
+├── ASR 推理      ~300ms
+├── 文本稳定化    ~1ms
+├── MT 翻译       ~200ms
+└── UI 渲染       ~10ms
 ```
 
-打包后的程序位于 `dist/SeamlessTranslator/` 目录。
-
-**注意**：模型不会打包进程序，首次运行时仍需下载。
+延迟日志自动输出到 `logs/latency.csv`。
 
 ## 常见问题
 
-### Q: 显存不足怎么办？
+### 没有音频输入
 
-A: 程序默认使用 8-bit 量化，需要约 5-6GB 显存。如果仍然不足，可以尝试：
-- 关闭其他占用显存的程序
-- 降低系统分辨率
+- Windows：选择带「WASAPI」的 loopback 设备捕获系统音频
+- 检查设备列表中的设备索引是否正确
+- 在 `config.yaml` 中将 `input_mode` 改为 `mic` 使用麦克风
 
-### Q: 模型下载失败？
+### 显存不足
 
-A: 可以手动下载模型：
-```bash
-# 使用 huggingface-cli
-pip install huggingface_hub
-huggingface-cli download facebook/seamless-m4t-v2-large
-```
+- 将 ASR 模型改为 `tiny` 或 `base`
+- 将 `compute_type` 改为 `int8`
+- 将 `device` 改为 `cpu`（速度会降低）
 
-### Q: 翻译延迟较高？
+### 翻译质量不佳
 
-A: 这是端到端模型的特点，翻译需要等待一段完整的语音后才能处理。默认设置：
-- 最小音频时长：2 秒
-- 最大音频时长：10 秒
-- 静音触发时长：0.5 秒
-
-### Q: 没有音频输入？
-
-A: 检查以下几点：
-1. 确保选择了正确的音频设备
-2. Windows 用户需要选择 WASAPI 设备以捕获系统音频
-3. 检查麦克风权限设置
-
-## 技术架构
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                      主窗口 (MainWindow)                  │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │
-│  │  音频设置   │  │  语言设置   │  │  外观设置   │     │
-│  └─────────────┘  └─────────────┘  └─────────────┘     │
-└─────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────┐
-│                  翻译工作线程 (TranslationWorker)         │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐     │
-│  │ AudioCapture│─▶│     VAD     │─▶│ Translator  │     │
-│  │  音频采集   │  │  语音检测   │  │ SeamlessM4T │     │
-│  └─────────────┘  └─────────────┘  └─────────────┘     │
-└─────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────┐
-│                   字幕窗口 (SubtitleWindow)               │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │                    原文                          │   │
-│  │                   译文                           │   │
-│  └─────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────┘
-```
+- 将 ASR 模型改为 `medium`（需要更多显存）
+- 将 NLLB 模型改为 `facebook/nllb-200-1.3B`
+- 调整 VAD 阈值减少误触发
 
 ## 许可证
 
-本项目仅供学习和研究使用。SeamlessM4T 模型由 Meta 发布，请遵守其使用条款。
-
-## 参考资源
-
-- [SeamlessM4T v2 - HuggingFace](https://huggingface.co/facebook/seamless-m4t-v2-large)
-- [Seamless Communication - GitHub](https://github.com/facebookresearch/seamless_communication)
-- [HuggingFace Transformers 文档](https://huggingface.co/docs/transformers/main/en/model_doc/seamless_m4t_v2)
+本项目仅供学习和研究使用。
+- faster-whisper: MIT License
+- NLLB: CC-BY-NC License
+- Silero VAD: MIT License
