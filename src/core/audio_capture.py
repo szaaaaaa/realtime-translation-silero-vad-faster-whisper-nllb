@@ -20,6 +20,9 @@ class AudioCapture:
     支持 loopback（系统内录）和 mic（麦克风）模式
     """
 
+    # Silero VAD 要求 16000Hz 下每帧恰好 512 个采样点
+    VAD_FRAME_SAMPLES = 512
+
     def __init__(self,
                  mode: str = "loopback",
                  device_index: Optional[int] = None,
@@ -31,20 +34,22 @@ class AudioCapture:
         Args:
             mode: 采集模式 ("loopback" 或 "mic")
             device_index: 设备索引，None 为自动选择
-            sample_rate: 采样率，固定 16000Hz
-            frame_ms: 帧时长（毫秒），固定 20ms
+            sample_rate: 目标采样率，固定 16000Hz
+            frame_ms: 设备端帧时长（毫秒），用于计算 blocksize
         """
         self.mode = mode
         self.device_index = device_index
         self.sample_rate = sample_rate
         self.frame_ms = frame_ms
-        self.frame_samples = sample_rate * frame_ms // 1000  # 320
+        self.frame_samples = self.VAD_FRAME_SAMPLES  # 512 for Silero VAD
 
+        self._native_sr: int = sample_rate  # 设备原生采样率，start() 时更新
         self._stream: Optional[sd.InputStream] = None
         self._running = False
         self._restart_count = 0
         self._max_restarts = 5
         self._frame_queue: queue.Queue = queue.Queue(maxsize=1000)
+        self._resample_buf = np.array([], dtype=np.float32)  # 重采样后的累积缓冲区
 
     def list_devices(self) -> List[Dict]:
         """列出所有可用的音频输入设备"""
@@ -86,6 +91,15 @@ class AudioCapture:
         # mic 模式或未找到 loopback
         return None  # 使用系统默认
 
+    @staticmethod
+    def _resample(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+        """线性插值重采样"""
+        if orig_sr == target_sr:
+            return audio
+        target_len = int(len(audio) * target_sr / orig_sr)
+        indices = np.linspace(0, len(audio) - 1, target_len)
+        return np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
+
     def _audio_callback(self, indata, frames, time_info, status):
         """音频流回调函数"""
         if status:
@@ -97,22 +111,29 @@ class AudioCapture:
         audio_data = indata.copy().astype(np.float32)
         if audio_data.ndim > 1:
             audio_data = audio_data.mean(axis=1)
+        audio_data = audio_data.flatten()
 
-        # 创建 AudioFrame
-        frame = AudioFrame(
-            samples=audio_data.flatten(),
-            timestamp=time.time()
-        )
+        # 重采样到目标采样率 (16000 Hz)
+        if self._native_sr != self.sample_rate:
+            audio_data = self._resample(audio_data, self._native_sr, self.sample_rate)
 
-        try:
-            self._frame_queue.put_nowait(frame)
-        except queue.Full:
-            # 队列满时丢弃最旧的帧
+        # 累积到缓冲区，按 512 采样切帧
+        self._resample_buf = np.concatenate([self._resample_buf, audio_data])
+        now = time.time()
+
+        while len(self._resample_buf) >= self.VAD_FRAME_SAMPLES:
+            chunk = self._resample_buf[:self.VAD_FRAME_SAMPLES]
+            self._resample_buf = self._resample_buf[self.VAD_FRAME_SAMPLES:]
+
+            frame = AudioFrame(samples=chunk, timestamp=now)
             try:
-                self._frame_queue.get_nowait()
                 self._frame_queue.put_nowait(frame)
-            except queue.Empty:
-                pass
+            except queue.Full:
+                try:
+                    self._frame_queue.get_nowait()
+                    self._frame_queue.put_nowait(frame)
+                except queue.Empty:
+                    pass
 
     def start(self) -> None:
         """启动音频采集"""
@@ -135,6 +156,9 @@ class AudioCapture:
         blocksize = int(native_sr * self.frame_ms / 1000)
 
         try:
+            self._native_sr = native_sr
+            self._resample_buf = np.array([], dtype=np.float32)
+
             self._stream = sd.InputStream(
                 device=device_idx,
                 samplerate=native_sr,
@@ -146,7 +170,8 @@ class AudioCapture:
             self._stream.start()
             self._running = True
             self._restart_count = 0
-            logger.info(f"音频采集已启动: device={device_idx}, sr={native_sr}, blocksize={blocksize}")
+            logger.info(f"音频采集已启动: device={device_idx}, native_sr={native_sr}, "
+                        f"target_sr={self.sample_rate}, blocksize={blocksize}")
         except Exception as e:
             logger.error(f"启动音频采集失败: {e}")
             self._on_error(e)
