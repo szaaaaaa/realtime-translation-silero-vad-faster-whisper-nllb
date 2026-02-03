@@ -1,0 +1,61 @@
+# 低延迟流式翻译配置
+
+# 音频设置
+audio:
+  input_mode: loopback  # loopback | mic
+  device_index: null    # null 为自动选择
+  sample_rate: 16000
+  frame_ms: 20
+
+# VAD 设置
+vad:
+  threshold: 0.50
+  speech_start_frames: 6
+  speech_end_frames: 10
+
+# 分块设置
+chunker:
+  chunk_ms: 1000
+  overlap_ms: 200
+  max_utterance_ms: 10000
+  tail_pad_ms: 120
+
+# ASR 设置
+asr:
+  model_size: small     # tiny | base | small | medium
+  language: en
+  beam_size: 1
+  temperature: 0
+  device: cuda          # cuda | cpu
+  compute_type: float16 # float16 | int8
+
+# MT 设置
+mt:
+  model_name: facebook/nllb-200-distilled-600M
+  src_lang: eng_Latn
+  tgt_lang: zho_Hans
+  device: cuda
+  cache_size: 2048
+
+# 稳定器设置
+stabilizer:
+  lock_min_chars: 12
+  buffer_keep_chars: 80
+  lcp_min_chars: 8
+
+# UI 设置
+ui:
+  refresh_hz: 10
+  history_lines: 50
+  font_size: 24
+  opacity: 0.8
+
+# 队列设置
+queues:
+  max_size: 32
+
+# 日志设置
+logging:
+  level: INFO
+  file: logs/app.log
+  latency_file: logs/latency.csv

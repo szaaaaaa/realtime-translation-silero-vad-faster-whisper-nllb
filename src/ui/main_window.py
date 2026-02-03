@@ -1,17 +1,25 @@
 """
-主窗口 - PyQt6 实现
+主窗口 - 流式翻译管道控制
 """
 import time
-import numpy as np
+import logging
+from queue import Queue
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QComboBox, QPushButton, QSlider,
                              QTextEdit, QGroupBox, QSpinBox, QProgressBar)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 
 from src.core.config_manager import ConfigManager
 from src.core.audio_capture import AudioCapture
-from src.core.seamless_translator import SeamlessTranslator, TARGET_LANGUAGE_CODES
+from src.core.vad import SileroVAD
+from src.core.chunker import Chunker
+from src.core.asr_worker import ASRWorker
+from src.core.text_stabilizer import TextStabilizer
+from src.core.mt_worker import MTWorker
+from src.core.latency_logger import LatencyLogger
 from src.ui.subtitle_window import SubtitleWindow
+
+logger = logging.getLogger(__name__)
 
 
 class ModelLoaderThread(QThread):
@@ -19,123 +27,100 @@ class ModelLoaderThread(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, translator: SeamlessTranslator):
+    def __init__(self, vad: SileroVAD, asr_worker: ASRWorker, mt_worker: MTWorker):
         super().__init__()
-        self.translator = translator
+        self.vad = vad
+        self.asr_worker = asr_worker
+        self.mt_worker = mt_worker
 
     def run(self):
         try:
-            self.translator.load_model(progress_callback=self.progress.emit)
-            self.finished.emit(True, "模型加载成功")
+            self.progress.emit("正在加载 VAD 模型...")
+            self.vad.load_model()
+
+            self.progress.emit("正在加载 ASR 模型 (faster-whisper)...")
+            self.asr_worker.load_model()
+
+            self.progress.emit("正在加载 MT 模型 (NLLB)...")
+            self.mt_worker.load_model()
+
+            self.finished.emit(True, "所有模型加载成功")
         except Exception as e:
             self.finished.emit(False, f"模型加载失败: {str(e)}")
 
 
-class TranslationWorker(QThread):
-    """翻译工作线程"""
-    text_updated = pyqtSignal(str, str)
+class PipelineWorker(QThread):
+    """流式处理管道工作线程"""
+    text_updated = pyqtSignal(str, str, str)  # partial_src, final_src, final_tgt
     status_updated = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, translator: SeamlessTranslator,
+    def __init__(self,
                  audio_capture: AudioCapture,
-                 config_manager: ConfigManager):
+                 vad: SileroVAD,
+                 chunker: Chunker,
+                 asr_worker: ASRWorker,
+                 text_stabilizer: TextStabilizer,
+                 mt_worker: MTWorker,
+                 latency_logger: LatencyLogger):
         super().__init__()
-        self.translator = translator
         self.audio_capture = audio_capture
-        self.cm = config_manager
+        self.vad = vad
+        self.chunker = chunker
+        self.asr_worker = asr_worker
+        self.text_stabilizer = text_stabilizer
+        self.mt_worker = mt_worker
+        self.latency_logger = latency_logger
         self.is_running = False
-
-        # VAD tuning for lower latency and fewer hallucinations
-        self.silence_threshold = 0.015
-        self.min_duration = 1.0
-        self.max_duration = 6.0
-        self.silence_duration = 0.3
-        self.min_speech_duration = 0.3
-        self.clear_after_silence = 1.5
-        self.last_speech_time = 0.0
-        self.last_translation_time = 0.0
-        self.subtitles_visible = False
 
     def run(self):
         self.is_running = True
 
         try:
-            trans_config = self.cm.get("translation")
-            source_lang = trans_config.get("source_lang", "auto")
-            target_lang = trans_config.get("target_lang", "zh-CN")
-
-            audio_config = self.cm.get("audio")
-            self.audio_capture.device_index = audio_config.get("device_index")
-
             self.audio_capture.start()
+            self.asr_worker.start()
+            self.mt_worker.start()
             self.status_updated.emit("正在监听...")
 
-            audio_buffer = []
-            current_duration = 0.0
-            silence_counter = 0.0
-            speech_duration = 0.0
-            sample_rate = self.audio_capture.current_sample_rate
-
             while self.is_running:
-                chunk = self.audio_capture.get_audio_chunk(timeout=0.5)
-                if chunk is None:
+                # 1. 读取音频帧
+                frame = self.audio_capture.read_frame(timeout=0.1)
+                if frame is None:
+                    self._process_asr_results()
+                    self._process_mt_results()
                     continue
 
-                audio_buffer.append(chunk)
-                chunk_duration = len(chunk) / sample_rate
-                current_duration += chunk_duration
+                # 2. VAD 处理
+                vad_event = self.vad.process_frame(frame.samples, frame.timestamp)
 
-                rms = np.sqrt(np.mean(chunk ** 2))
-                if rms < self.silence_threshold:
-                    silence_counter += chunk_duration
-                else:
-                    silence_counter = 0.0
-                    speech_duration += chunk_duration
-                    self.last_speech_time = time.time()
+                if vad_event:
+                    if vad_event.event_type == "start":
+                        self.latency_logger.start_utterance()
+                        self.latency_logger.log_capture(frame.timestamp)
+                        self.chunker.on_vad_start(vad_event.timestamp)
+                        self.status_updated.emit("检测到语音...")
 
-                should_translate = False
-                if current_duration > self.min_duration and silence_counter > self.silence_duration:
-                    should_translate = True
-                elif current_duration > self.max_duration:
-                    should_translate = True
-
-                if should_translate and audio_buffer:
-                    if speech_duration < self.min_speech_duration:
-                        # Treat as silence/noise: clear buffer and subtitles
-                        audio_buffer = []
-                        current_duration = 0.0
-                        silence_counter = 0.0
-                        speech_duration = 0.0
-                        self.status_updated.emit("????...")
-                        continue
-
-                    full_audio = np.concatenate(audio_buffer, axis=0)
-                    full_audio = full_audio.flatten()
-
-                    self.status_updated.emit("正在翻译...")
-
-                    try:
-                        original, translated = self.translator.translate(
-                            audio=full_audio,
-                            source_lang=source_lang,
-                            target_lang=target_lang,
-                            original_sr=sample_rate
+                    elif vad_event.event_type == "frame":
+                        chunk = self.chunker.on_speech_frame(
+                            vad_event.frame,
+                            vad_event.timestamp
                         )
+                        if chunk:
+                            self.latency_logger.log_chunk_emit()
+                            self.asr_worker.input_queue.put(chunk)
 
-                        if translated.strip():
-                            self.text_updated.emit(original, translated)
-                            self.subtitles_visible = True
-                            self.last_translation_time = time.time()
+                    elif vad_event.event_type == "end":
+                        chunk = self.chunker.on_vad_end(vad_event.timestamp)
+                        if chunk:
+                            self.latency_logger.log_chunk_emit()
+                            self.asr_worker.input_queue.put(chunk)
+                        self.status_updated.emit("正在监听...")
 
-                    except Exception as e:
-                        self.status_updated.emit(f"翻译错误: {str(e)}")
+                # 3. 处理 ASR 结果
+                self._process_asr_results()
 
-                    audio_buffer = []
-                    current_duration = 0.0
-                    silence_counter = 0.0
-                    speech_duration = 0.0
-                    self.status_updated.emit("正在监听...")
+                # 4. 处理 MT 结果
+                self._process_mt_results()
 
         except Exception as e:
             import traceback
@@ -143,34 +128,140 @@ class TranslationWorker(QThread):
             self.error_occurred.emit(error_msg)
         finally:
             self.audio_capture.stop()
+            self.asr_worker.stop()
+            self.mt_worker.stop()
             self.status_updated.emit("已停止")
+
+    def _process_asr_results(self):
+        """处理 ASR 结果"""
+        try:
+            while not self.asr_worker.output_queue.empty():
+                result = self.asr_worker.output_queue.get_nowait()
+
+                self.latency_logger.log_asr_start(result.t_asr_start)
+                self.latency_logger.log_asr_end(result.t_asr_end)
+
+                # 文本稳定化
+                stable_output = self.text_stabilizer.process(result)
+                self.latency_logger.log_stabilize()
+
+                if result.is_final and stable_output.final_append_src:
+                    # 发送到 MT
+                    self.latency_logger.log_mt_start()
+                    self.mt_worker.input_queue.put(stable_output.final_append_src)
+                    # 更新 UI（原文 final）
+                    self.text_updated.emit("", stable_output.final_append_src, "")
+                else:
+                    # 更新 UI（partial）
+                    self.text_updated.emit(stable_output.partial_src, "", "")
+        except Exception as e:
+            logger.error(f"处理 ASR 结果错误: {e}")
+
+    def _process_mt_results(self):
+        """处理 MT 结果"""
+        try:
+            while not self.mt_worker.output_queue.empty():
+                result = self.mt_worker.output_queue.get_nowait()
+
+                self.latency_logger.log_mt_end(result.t_mt_end)
+                self.latency_logger.log_ui_render()
+                self.latency_logger.end_utterance()
+
+                # 更新 UI（译文 final）
+                self.text_updated.emit("", "", result.target)
+        except Exception as e:
+            logger.error(f"处理 MT 结果错误: {e}")
 
     def stop(self):
         self.is_running = False
-        self.audio_capture.stop()
 
 
 class MainWindow(QMainWindow):
     """主窗口"""
 
-    def __init__(self):
+    def __init__(self, config: dict = None):
         super().__init__()
-        self.setWindowTitle("Seamless 实时翻译")
+        self.setWindowTitle("低延迟流式翻译")
         self.resize(450, 650)
 
         self.cm = ConfigManager()
-        self.audio_capture = AudioCapture(chunk_duration=0.25)
-        self.translator = SeamlessTranslator(device="cuda", use_8bit=True)
+        self._init_components(config or {})
+        self._init_ui()
 
         self.subtitle_window = SubtitleWindow(self.cm.config.get("display", {}))
+        self.subtitle_window.show()
+
         self.worker = None
         self.model_loader = None
 
-        self.init_ui()
-        self.subtitle_window.show()
-        self.load_model()
+        self.load_models()
 
-    def init_ui(self):
+    def _init_components(self, config: dict):
+        """初始化管道组件"""
+        # 从配置获取参数
+        audio_cfg = self.cm.get("audio")
+        vad_cfg = config.get("vad", {})
+        chunker_cfg = config.get("chunker", {})
+        asr_cfg = config.get("asr", {})
+        mt_cfg = config.get("mt", {})
+
+        # 音频采集
+        self.audio_capture = AudioCapture(
+            mode=audio_cfg.get("input_mode", "loopback"),
+            device_index=audio_cfg.get("device_index"),
+            sample_rate=16000,
+            frame_ms=20
+        )
+
+        # VAD
+        self.vad = SileroVAD(
+            threshold=vad_cfg.get("threshold", 0.5),
+            speech_start_frames=vad_cfg.get("speech_start_frames", 6),
+            speech_end_frames=vad_cfg.get("speech_end_frames", 10)
+        )
+
+        # Chunker
+        self.chunker = Chunker(
+            chunk_ms=chunker_cfg.get("chunk_ms", 1000),
+            overlap_ms=chunker_cfg.get("overlap_ms", 200),
+            max_utterance_ms=chunker_cfg.get("max_utterance_ms", 10000),
+            tail_pad_ms=chunker_cfg.get("tail_pad_ms", 120)
+        )
+
+        # 队列
+        self.q_asr_in = Queue(maxsize=32)
+        self.q_asr_out = Queue(maxsize=32)
+        self.q_mt_in = Queue(maxsize=32)
+        self.q_mt_out = Queue(maxsize=32)
+
+        # ASR Worker
+        self.asr_worker = ASRWorker(
+            input_queue=self.q_asr_in,
+            output_queue=self.q_asr_out,
+            model_size=asr_cfg.get("model_size", "small"),
+            language=asr_cfg.get("language", "en"),
+            device=asr_cfg.get("device", "cuda"),
+            compute_type=asr_cfg.get("compute_type", "float16")
+        )
+
+        # Text Stabilizer
+        self.text_stabilizer = TextStabilizer()
+
+        # MT Worker
+        self.mt_worker = MTWorker(
+            input_queue=self.q_mt_in,
+            output_queue=self.q_mt_out,
+            model_name=mt_cfg.get("model_name", "facebook/nllb-200-distilled-600M"),
+            src_lang=mt_cfg.get("src_lang", "eng_Latn"),
+            tgt_lang=mt_cfg.get("tgt_lang", "zho_Hans"),
+            device=mt_cfg.get("device", "cuda")
+        )
+
+        # Latency Logger
+        self.latency_logger = LatencyLogger()
+
+    def _init_ui(self):
+        """初始化 UI"""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
@@ -222,32 +313,6 @@ class MainWindow(QMainWindow):
         audio_group.setLayout(audio_layout)
         layout.addWidget(audio_group)
 
-        # 语言设置
-        lang_group = QGroupBox("语言")
-        lang_layout = QHBoxLayout()
-
-        self.combo_src = QComboBox()
-        self.combo_src.addItems(["auto", "en", "zh", "ja", "ko", "es", "fr", "de", "ru"])
-        self.combo_src.setCurrentText(
-            self.cm.get("translation").get("source_lang", "auto")
-        )
-
-        self.combo_target = QComboBox()
-        self.combo_target.addItems(list(TARGET_LANGUAGE_CODES.keys()))
-        self.combo_target.setCurrentText(
-            self.cm.get("translation").get("target_lang", "zh-CN")
-        )
-
-        self.combo_src.currentTextChanged.connect(self.save_lang_settings)
-        self.combo_target.currentTextChanged.connect(self.save_lang_settings)
-
-        lang_layout.addWidget(QLabel("源语言:"))
-        lang_layout.addWidget(self.combo_src)
-        lang_layout.addWidget(QLabel("目标语言:"))
-        lang_layout.addWidget(self.combo_target)
-        lang_group.setLayout(lang_layout)
-        layout.addWidget(lang_group)
-
         # 外观设置
         ui_group = QGroupBox("外观")
         ui_layout = QVBoxLayout()
@@ -255,7 +320,7 @@ class MainWindow(QMainWindow):
         self.slider_opacity = QSlider(Qt.Orientation.Horizontal)
         self.slider_opacity.setRange(10, 100)
         self.slider_opacity.setValue(
-            int(self.cm.get("display").get("opacity", 0.7) * 100)
+            int(self.cm.get("display").get("opacity", 0.8) * 100)
         )
         self.slider_opacity.valueChanged.connect(self.update_appearance)
 
@@ -280,13 +345,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("日志:"))
         layout.addWidget(self.log_area)
 
-    def load_model(self):
-        """加载 SeamlessM4T 模型"""
+    def load_models(self):
+        """加载所有模型"""
         self.lbl_model_status.setText("正在加载模型...")
         self.progress_bar.show()
         self.btn_start.setEnabled(False)
 
-        self.model_loader = ModelLoaderThread(self.translator)
+        self.model_loader = ModelLoaderThread(
+            self.vad,
+            self.asr_worker,
+            self.mt_worker
+        )
         self.model_loader.progress.connect(self.on_model_progress)
         self.model_loader.finished.connect(self.on_model_loaded)
         self.model_loader.start()
@@ -329,11 +398,7 @@ class MainWindow(QMainWindow):
         idx = self.combo_devices.currentData()
         if idx is not None:
             self.cm.set("audio", "device_index", idx)
-
-    def save_lang_settings(self):
-        """保存语言设置"""
-        self.cm.set("translation", "source_lang", self.combo_src.currentText())
-        self.cm.set("translation", "target_lang", self.combo_target.currentText())
+            self.audio_capture.device_index = idx
 
     def update_appearance(self):
         """更新外观设置"""
@@ -358,13 +423,22 @@ class MainWindow(QMainWindow):
                 "font-weight: bold; padding: 10px;"
             )
             self.log("翻译已停止")
+
+            # 重置组件
+            self.vad.reset()
+            self.chunker.reset()
+            self.text_stabilizer.reset()
         else:
-            self.worker = TranslationWorker(
-                self.translator,
+            self.worker = PipelineWorker(
                 self.audio_capture,
-                self.cm
+                self.vad,
+                self.chunker,
+                self.asr_worker,
+                self.text_stabilizer,
+                self.mt_worker,
+                self.latency_logger
             )
-            self.worker.text_updated.connect(self.subtitle_window.update_text)
+            self.worker.text_updated.connect(self.subtitle_window.update_subtitle)
             self.worker.status_updated.connect(self.log)
             self.worker.error_occurred.connect(lambda e: self.log(f"错误: {e}"))
             self.worker.start()

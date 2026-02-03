@@ -1,24 +1,33 @@
-# PyTorch with CUDA support
-# RTX 50 系列 (Blackwell/SM_120): cu128
-# RTX 40/30 系列: cu121 或 cu124
---extra-index-url https://download.pytorch.org/whl/cu128
-torch>=2.6.0
-torchaudio>=2.6.0
+# 核心依赖
+numpy>=1.24.0
+PyQt6>=6.5.0
 
-# HuggingFace Transformers
+# 音频采集
+sounddevice>=0.4.6
+
+# VAD - Silero VAD 通过 torch.hub 加载
+# (无需单独安装)
+
+# ASR - faster-whisper
+faster-whisper>=0.10.0
+ctranslate2>=3.20.0
+
+# MT - NLLB (HuggingFace)
 transformers>=4.36.0
 sentencepiece
-accelerate
 
-# 8-bit 量化支持（8GB 显存必需）
-bitsandbytes>=0.41.0
+# PyTorch (GPU 推理)
+# RTX 50 系列 (Blackwell/SM_120): cu128
+# RTX 40/30 系列: cu121 或 cu124
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch>=2.1.0
 
-# Audio
-sounddevice
-numpy
+# 配置
+pyyaml>=6.0
 
-# UI
-PyQt6
+# 开发/调试
+tqdm
 
-# Packaging (optional)
-pyinstaller
+# 可选 - 8bit 量化 (低显存)
+# bitsandbytes>=0.41.0
+# accelerate
