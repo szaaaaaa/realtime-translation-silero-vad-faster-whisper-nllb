@@ -26,7 +26,9 @@ class ASRWorker:
                  model_size: str = "small",
                  language: str = "en",
                  device: str = "cuda",
-                 compute_type: str = "float16"):
+                 compute_type: str = "float16",
+                 beam_size: int = 1,
+                 temperature: float = 0.0):
         """
         初始化 ASR Worker
 
@@ -44,6 +46,8 @@ class ASRWorker:
         self.language = language
         self.device = device
         self.compute_type = compute_type
+        self.beam_size = beam_size
+        self.temperature = temperature
 
         self._model = None
         self._running = False
@@ -132,8 +136,8 @@ class ASRWorker:
             segments, info = self._model.transcribe(
                 chunk.audio,
                 language=self.language,
-                beam_size=1,
-                temperature=0,
+                beam_size=self.beam_size,
+                temperature=self.temperature,
                 vad_filter=False,
                 word_timestamps=False
             )

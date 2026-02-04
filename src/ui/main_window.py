@@ -205,6 +205,7 @@ class MainWindow(QMainWindow):
         chunker_cfg = config.get("chunker", {})
         asr_cfg = config.get("asr", {})
         mt_cfg = config.get("mt", {})
+        stabilizer_cfg = config.get("stabilizer", {})
 
         # 音频采集
         self.audio_capture = AudioCapture(
@@ -242,11 +243,17 @@ class MainWindow(QMainWindow):
             model_size=asr_cfg.get("model_size", "small"),
             language=asr_cfg.get("language", "en"),
             device=asr_cfg.get("device", "cuda"),
-            compute_type=asr_cfg.get("compute_type", "float16")
+            compute_type=asr_cfg.get("compute_type", "float16"),
+            beam_size=asr_cfg.get("beam_size", 1),
+            temperature=asr_cfg.get("temperature", 0.0)
         )
 
         # Text Stabilizer
-        self.text_stabilizer = TextStabilizer()
+        self.text_stabilizer = TextStabilizer(
+            lock_min_chars=stabilizer_cfg.get("lock_min_chars", 12),
+            buffer_keep_chars=stabilizer_cfg.get("buffer_keep_chars", 80),
+            lcp_min_chars=stabilizer_cfg.get("lcp_min_chars", 8)
+        )
 
         # MT Worker
         self.mt_worker = MTWorker(
@@ -255,7 +262,8 @@ class MainWindow(QMainWindow):
             model_name=mt_cfg.get("model_name", "facebook/nllb-200-distilled-600M"),
             src_lang=mt_cfg.get("src_lang", "eng_Latn"),
             tgt_lang=mt_cfg.get("tgt_lang", "zho_Hans"),
-            device=mt_cfg.get("device", "cuda")
+            device=mt_cfg.get("device", "cuda"),
+            num_beams=mt_cfg.get("num_beams", 1)
         )
 
         # Latency Logger

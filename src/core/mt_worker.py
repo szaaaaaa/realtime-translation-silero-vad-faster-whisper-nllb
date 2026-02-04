@@ -55,7 +55,8 @@ class MTWorker:
                  src_lang: str = "eng_Latn",
                  tgt_lang: str = "zho_Hans",
                  device: str = "cuda",
-                 cache_size: int = 2048):
+                 cache_size: int = 2048,
+                 num_beams: int = 1):
         """
         初始化 MT Worker
 
@@ -75,6 +76,7 @@ class MTWorker:
         self.tgt_lang = tgt_lang
         self.device = device
         self.cache_size = cache_size
+        self.num_beams = max(1, int(num_beams))
 
         self._model = None
         self._tokenizer = None
@@ -203,7 +205,7 @@ class MTWorker:
                     **inputs,
                     forced_bos_token_id=forced_bos_token_id,
                     max_length=256,
-                    num_beams=1,  # 使用 greedy 解码加速
+                    num_beams=self.num_beams,
                     do_sample=False
                 )
 

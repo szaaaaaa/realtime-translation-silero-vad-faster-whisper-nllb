@@ -15,17 +15,17 @@ vad:
 
 # 分块设置
 chunker:
-  chunk_ms: 1000
-  overlap_ms: 200
+  chunk_ms: 1100
+  overlap_ms: 300
   max_utterance_ms: 10000
-  tail_pad_ms: 120
+  tail_pad_ms: 200
 
 # ASR 设置
 asr:
-  model_size: small     # tiny | base | small | medium
+  model_size: small.en  # tiny | base | small | medium | medium.en | large-v3
   language: en
-  beam_size: 1
-  temperature: 0
+  beam_size: 3
+  temperature: 0.0
   device: cuda          # cuda | cpu
   compute_type: float16 # float16 | int8
 
@@ -35,7 +35,8 @@ mt:
   src_lang: eng_Latn
   tgt_lang: zho_Hans
   device: cuda
-  cache_size: 2048
+  cache_size: 4096
+  num_beams: 3
 
 # 稳定器设置
 stabilizer:
