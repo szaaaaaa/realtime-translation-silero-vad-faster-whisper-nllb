@@ -1,35 +1,45 @@
-# 低延迟流式翻译配置
+﻿# Low-latency streaming translation config
 
-# 音频设置
 audio:
-  input_mode: loopback  # loopback | mic
-  device_index: null    # null 为自动选择
+  input_mode: loopback
+  device_index: null
   sample_rate: 16000
   frame_ms: 20
+  pre_roll_ms: 600
 
-# VAD 设置
 vad:
   threshold: 0.50
-  speech_start_frames: 6
-  speech_end_frames: 10
+  speech_start_frames: 4
+  speech_end_frames: 14
 
-# 分块设置
 chunker:
   chunk_ms: 800
   overlap_ms: 180
   max_utterance_ms: 10000
   tail_pad_ms: 200
 
-# ASR 设置
+streaming:
+  pause_merge_ms: 380
+  final_merge_window_ms: 900
+  final_merge_min_chars: 32
+
 asr:
-  model_size: small.en  # tiny | base | small | medium | medium.en | large-v3
+  model_size: small.en
   language: en
   beam_size: 2
+  beam_size_final: 5
   temperature: 0.0
-  device: cuda          # cuda | cpu
-  compute_type: float16 # float16 | int8
+  condition_on_previous_text: false
+  word_timestamps: false
+  compression_ratio_threshold: 2.2
+  log_prob_threshold: -1.0
+  no_speech_threshold: 0.35
+  suppress_blank: true
+  suppress_tokens: "-1"
+  initial_prompt: ""
+  device: cuda
+  compute_type: float16
 
-# MT 设置
 mt:
   model_name: facebook/nllb-200-distilled-600M
   src_lang: eng_Latn
@@ -37,28 +47,37 @@ mt:
   device: cuda
   cache_size: 4096
   num_beams: 2
+  flush_each_input: false
   batch_max_wait_ms: 120
+  continuation_wait_ms: 280
+  continuation_max_chars: 140
   batch_max_chars: 220
   max_chars: 360
 
-# 稳定器设置
+refine:
+  enabled: true
+  model_name: facebook/nllb-200-1.3B
+  device: auto
+  num_beams: 3
+  flush_each_input: true
+  queue_size: 2
+  cache_size: 512
+  max_chars: 420
+
 stabilizer:
   lock_min_chars: 12
   buffer_keep_chars: 80
   lcp_min_chars: 8
 
-# UI 设置
 ui:
   refresh_hz: 10
   history_lines: 50
   font_size: 24
   opacity: 0.8
 
-# 队列设置
 queues:
   max_size: 32
 
-# 日志设置
 logging:
   level: INFO
   file: logs/app.log

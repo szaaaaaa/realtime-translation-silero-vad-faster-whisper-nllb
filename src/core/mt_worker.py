@@ -1,4 +1,4 @@
-"""
+﻿"""
 MT (Machine Translation) 工作线程模块
 使用 NLLB 进行文本翻译
 """
@@ -49,6 +49,15 @@ class MTWorker:
     不继承 threading.Thread，内部管理线程实例以支持重复 start/stop
     """
 
+    _INCOMPLETE_TAIL_RE = re.compile(
+        r"(?:\b(?:and|or|but|because|if|when|while|that|which|who|whose|whom|where|"
+        r"to|of|for|with|as|than|from|into|about|without|within|through)\b|"
+        r"(?:\u56e0\u4e3a|\u6240\u4ee5|\u4f46\u662f|\u800c\u4e14|\u5e76\u4e14|"
+        r"\u5982\u679c|\u867d\u7136|\u7136\u800c|\u5e76|\u4e14|\u548c|\u4e0e|"
+        r"\u5728|\u5bf9|\u628a|\u88ab))\s*$",
+        re.IGNORECASE
+    )
+
     def __init__(self,
                  input_queue: Queue,
                  output_queue: Queue,
@@ -58,7 +67,10 @@ class MTWorker:
                  device: str = "cuda",
                  cache_size: int = 2048,
                  num_beams: int = 1,
+                 flush_each_input: bool = False,
                  batch_max_wait_ms: int = 120,
+                 continuation_wait_ms: int = 280,
+                 continuation_max_chars: int = 140,
                  batch_max_chars: int = 220,
                  max_chars: int = 360):
         """
@@ -81,7 +93,10 @@ class MTWorker:
         self.device = device
         self.cache_size = cache_size
         self.num_beams = max(1, int(num_beams))
+        self.flush_each_input = bool(flush_each_input)
         self.batch_max_wait_ms = max(20, int(batch_max_wait_ms))
+        self.continuation_wait_ms = max(self.batch_max_wait_ms, int(continuation_wait_ms))
+        self.continuation_max_chars = max(40, int(continuation_max_chars))
         self.batch_max_chars = max(50, int(batch_max_chars))
         self.max_chars = max(120, int(max_chars))
 
@@ -96,32 +111,48 @@ class MTWorker:
         self._pending_started_at = 0.0
 
     def load_model(self) -> None:
-        """加载翻译模型"""
-        logger.info(f"正在加载 NLLB 模型: {self.model_name}")
-        logger.info(f"翻译方向: {self.src_lang} -> {self.tgt_lang}")
+        """Load translation model."""
+        logger.info(f"Loading NLLB model: {self.model_name}")
+        logger.info(f"Direction: {self.src_lang} -> {self.tgt_lang}")
 
         try:
             from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+            import torch
 
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self._model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
 
-            if self.device == "cuda":
-                import torch
+            if self.device == "auto":
+                model_kwargs = {"device_map": "auto"}
                 if torch.cuda.is_available():
-                    self._model = self._model.to("cuda")
-                    logger.info("NLLB 模型已加载到 GPU")
-                else:
-                    logger.warning("CUDA 不可用，使用 CPU")
+                    model_kwargs["torch_dtype"] = torch.float16
+                try:
+                    self._model = AutoModelForSeq2SeqLM.from_pretrained(
+                        self.model_name,
+                        **model_kwargs
+                    )
+                    logger.info("NLLB model loaded with device_map=auto")
+                except Exception as e:
+                    logger.warning(f"device_map=auto failed, fallback to CPU: {e}")
                     self.device = "cpu"
+                    self._model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
             else:
-                logger.info("NLLB 模型使用 CPU")
+                self._model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
+                if self.device == "cuda":
+                    if torch.cuda.is_available():
+                        self._model = self._model.to("cuda")
+                        logger.info("NLLB model loaded on GPU")
+                    else:
+                        logger.warning("CUDA unavailable, fallback to CPU")
+                        self.device = "cpu"
+                else:
+                    logger.info("NLLB model loaded on CPU")
+                    self.device = "cpu"
 
             self._model.eval()
-            logger.info("NLLB 模型加载成功")
+            logger.info("NLLB model load completed")
 
         except Exception as e:
-            logger.error(f"加载 NLLB 模型失败: {e}")
+            logger.error(f"Failed to load NLLB model: {e}")
             raise
 
     def start(self) -> None:
@@ -134,16 +165,24 @@ class MTWorker:
         self._thread.start()
 
     def _run(self) -> None:
-        """工作线程主循环"""
+        """Worker main loop."""
         if self._model is None:
-            logger.error("MT 模型未加载")
+            logger.error("MT model not loaded")
             return
 
-        logger.info("MT Worker 已启动")
+        logger.info("MT Worker started")
 
         while self._running:
             try:
                 text = self.input_queue.get(timeout=0.05)
+
+                if self.flush_each_input:
+                    if text and text.strip():
+                        result = self._translate(text)
+                        self.output_queue.put(result)
+                        self._error_count = 0
+                    continue
+
                 if text and text.strip():
                     self._collect_pending(text)
 
@@ -152,6 +191,8 @@ class MTWorker:
                     self.output_queue.put(flushed)
                     self._error_count = 0
             except Empty:
+                if self.flush_each_input:
+                    continue
                 flushed = self._flush_pending_if_needed(force=True)
                 if flushed is not None:
                     self.output_queue.put(flushed)
@@ -159,7 +200,7 @@ class MTWorker:
             except Exception as e:
                 self._handle_error(e)
 
-        logger.info("MT Worker 已停止")
+        logger.info("MT Worker stopped")
 
     def _collect_pending(self, text: str) -> None:
         """收集短文本，降低每次 generate 的开销并提升上下文完整性。"""
@@ -173,7 +214,7 @@ class MTWorker:
         self._pending_parts.append(normalized)
 
     def _flush_pending_if_needed(self, force: bool) -> Optional[MTResult]:
-        """满足条件时合并并翻译。"""
+        """Flush pending text only when context is likely complete."""
         if not self._pending_parts:
             return None
 
@@ -181,12 +222,14 @@ class MTWorker:
         pending_chars = len(joined)
         waited_ms = (time.time() - self._pending_started_at) * 1000
 
-        boundary = bool(re.search(r"[.!?。！？]$", joined))
-        should_flush = (
-            pending_chars >= self.batch_max_chars
-            or boundary
-            or (force and waited_ms >= self.batch_max_wait_ms)
-        )
+        boundary = self._has_sentence_boundary(joined)
+        should_flush = pending_chars >= self.batch_max_chars or boundary
+
+        if not should_flush and force:
+            wait_ms = self.batch_max_wait_ms
+            if self._looks_like_incomplete_clause(joined) and pending_chars <= self.continuation_max_chars:
+                wait_ms = self.continuation_wait_ms
+            should_flush = waited_ms >= wait_ms
 
         if not should_flush:
             return None
@@ -198,6 +241,19 @@ class MTWorker:
     @staticmethod
     def _normalize_text(text: str) -> str:
         return re.sub(r"\s+", " ", text).strip()
+
+    @staticmethod
+    def _has_sentence_boundary(text: str) -> bool:
+        return bool(re.search(r"[.!?\u3002\uff01\uff1f][\"\)\]]*\s*$", text))
+
+    def _looks_like_incomplete_clause(self, text: str) -> bool:
+        if not text or self._has_sentence_boundary(text):
+            return False
+        if re.search(r"[,;:\uff0c\uff1b\uff1a]\s*$", text):
+            return True
+        if self._INCOMPLETE_TAIL_RE.search(text):
+            return True
+        return bool(re.search(r"[\w\u4e00-\u9fff]$", text))
 
     @staticmethod
     def _truncate_on_boundary(text: str, max_chars: int) -> str:
@@ -333,3 +389,4 @@ class MTWorker:
     def cache_size_used(self) -> int:
         """缓存使用量"""
         return len(self._cache)
+
