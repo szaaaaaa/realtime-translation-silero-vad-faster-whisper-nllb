@@ -263,7 +263,11 @@ class MainWindow(QMainWindow):
             src_lang=mt_cfg.get("src_lang", "eng_Latn"),
             tgt_lang=mt_cfg.get("tgt_lang", "zho_Hans"),
             device=mt_cfg.get("device", "cuda"),
-            num_beams=mt_cfg.get("num_beams", 1)
+            cache_size=mt_cfg.get("cache_size", 4096),
+            num_beams=mt_cfg.get("num_beams", 2),
+            batch_max_wait_ms=mt_cfg.get("batch_max_wait_ms", 120),
+            batch_max_chars=mt_cfg.get("batch_max_chars", 220),
+            max_chars=mt_cfg.get("max_chars", 360)
         )
 
         # Latency Logger

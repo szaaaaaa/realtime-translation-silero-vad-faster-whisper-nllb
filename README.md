@@ -116,19 +116,29 @@ vad:
   speech_start_frames: 6   # 连续几帧判定语音开始
   speech_end_frames: 10    # 连续几帧判定语音结束
 
+# 分块设置（直接影响实时性）
+chunker:
+  chunk_ms: 800         # 推荐 700-900，越小延迟越低
+  overlap_ms: 180       # 推荐 120-220，减少断词
+
 # ASR 设置
 asr:
-  model_size: small     # tiny | base | small | medium
-  language: en          # 识别语言
+  model_size: small.en  # tiny | base | small | medium | medium.en | large-v3
+  language: en
+  beam_size: 2          # 推荐 1-2，越大越准但更慢
   device: cuda          # cuda | cpu
   compute_type: float16 # float16（GPU） | int8（CPU）
 
 # MT 设置
 mt:
   model_name: facebook/nllb-200-distilled-600M
-  src_lang: eng_Latn    # 源语言
-  tgt_lang: zho_Hans    # 目标语言
-  cache_size: 2048      # 翻译缓存大小
+  src_lang: eng_Latn
+  tgt_lang: zho_Hans
+  cache_size: 4096
+  num_beams: 2
+  batch_max_wait_ms: 120  # 短句合并等待时间（毫秒）
+  batch_max_chars: 220    # 达到该长度立即翻译
+  max_chars: 360          # 超长文本按标点截断
 
 # UI 设置
 ui:
