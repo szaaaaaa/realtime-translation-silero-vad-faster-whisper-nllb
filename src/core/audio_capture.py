@@ -5,6 +5,7 @@
 import sounddevice as sd
 import numpy as np
 from typing import Optional, List, Dict
+from collections import deque
 import queue
 import time
 import logging
@@ -22,6 +23,23 @@ class AudioCapture:
 
     # Silero VAD 要求 16000Hz 下每帧恰好 512 个采样点
     VAD_FRAME_SAMPLES = 512
+    PROFILE_COMPUTER_INPUT = "computer_input"
+    PROFILE_HEADSET_INPUT = "headset_input"
+    PROFILE_COMPUTER_LOOPBACK = "computer_loopback"
+
+    _HEADSET_KEYWORDS = (
+        "headset", "headphone", "earphone", "airpods", "buds", "hands-free",
+        "bluetooth", "耳机", "耳麦"
+    )
+    _LOOPBACK_KEYWORDS = (
+        "loopback", "stereo mix", "what u hear", "monitor", "立体声混音", "内录"
+    )
+    _COMPUTER_MIC_KEYWORDS = (
+        "microphone", "mic", "array", "line in", "麦克风", "阵列", "内置"
+    )
+    _VIRTUAL_DEVICE_KEYWORDS = (
+        "cable", "virtual", "voicemeeter", "obs", "nvidia broadcast", "blackhole"
+    )
 
     def __init__(self,
                  mode: str = "loopback",
@@ -55,7 +73,7 @@ class AudioCapture:
         self._max_restarts = 5
         max_frames = max(100, int(ring_buffer_seconds * 1000 / self.frame_ms))
         self._frame_queue: queue.Queue = queue.Queue(maxsize=max_frames)
-        self._pre_roll_frames: queue.deque = queue.deque(
+        self._pre_roll_frames: deque = deque(
             maxlen=max(1, int(self.pre_roll_ms / self.frame_ms))
         )
         self._resample_buf = np.array([], dtype=np.float32)  # 重采样后的累积缓冲区
@@ -66,6 +84,7 @@ class AudioCapture:
         for i, dev in enumerate(sd.query_devices()):
             if dev['max_input_channels'] > 0:
                 hostapi = sd.query_hostapis(dev['hostapi'])
+                name_lower = dev['name'].lower()
                 devices.append({
                     'index': i,
                     'name': dev['name'],
@@ -73,7 +92,11 @@ class AudioCapture:
                     'sample_rate': dev['default_samplerate'],
                     'hostapi': hostapi['name'],
                     'is_wasapi': 'WASAPI' in hostapi['name'],
-                    'is_loopback': 'loopback' in dev['name'].lower() or 'stereo mix' in dev['name'].lower()
+                    'is_loopback': (
+                        'loopback' in name_lower
+                        or 'stereo mix' in name_lower
+                        or '立体声混音' in dev['name']
+                    )
                 })
         return devices
 
@@ -98,28 +121,135 @@ class AudioCapture:
             'output': _normalize(default_out)
         }
 
+    @staticmethod
+    def _contains_any(text: str, keywords: tuple) -> bool:
+        return any(keyword in text for keyword in keywords)
+
+    def _infer_profile(self, dev: Dict) -> str:
+        name = dev['name'].lower()
+
+        if dev.get('is_loopback') or self._contains_any(name, self._LOOPBACK_KEYWORDS):
+            return self.PROFILE_COMPUTER_LOOPBACK
+        if self._contains_any(name, self._HEADSET_KEYWORDS):
+            return self.PROFILE_HEADSET_INPUT
+        return self.PROFILE_COMPUTER_INPUT
+
+    def _score_device(self, dev: Dict, profile: str, defaults: Dict[str, Optional[int]]) -> int:
+        name = dev['name'].lower()
+        score = 0
+
+        if dev.get('is_wasapi'):
+            score += 30
+
+        if profile == self.PROFILE_COMPUTER_LOOPBACK:
+            if dev.get('is_loopback'):
+                score += 60
+            if self._contains_any(name, self._LOOPBACK_KEYWORDS):
+                score += 40
+            if defaults.get('output') == dev['index']:
+                score += 25
+        elif profile == self.PROFILE_HEADSET_INPUT:
+            if self._contains_any(name, self._HEADSET_KEYWORDS):
+                score += 50
+            if defaults.get('input') == dev['index']:
+                score += 25
+        else:
+            if self._contains_any(name, self._COMPUTER_MIC_KEYWORDS):
+                score += 35
+            if self._contains_any(name, self._HEADSET_KEYWORDS):
+                score -= 15
+            if defaults.get('input') == dev['index']:
+                score += 25
+
+        if self._contains_any(name, self._VIRTUAL_DEVICE_KEYWORDS):
+            score -= 20
+
+        return score
+
+    def pick_preferred_devices(self) -> Dict[str, Optional[Dict]]:
+        """
+        选择三类首选输入设备：
+        - computer_input: 电脑输入（内置/外接麦克风）
+        - headset_input: 耳机输入（耳机麦克风）
+        - computer_loopback: 电脑内录（系统回环）
+        """
+        devices = self.list_devices()
+        defaults = self.get_default_devices()
+        best = {
+            self.PROFILE_COMPUTER_INPUT: None,
+            self.PROFILE_HEADSET_INPUT: None,
+            self.PROFILE_COMPUTER_LOOPBACK: None
+        }
+        best_scores = {
+            self.PROFILE_COMPUTER_INPUT: -10**9,
+            self.PROFILE_HEADSET_INPUT: -10**9,
+            self.PROFILE_COMPUTER_LOOPBACK: -10**9
+        }
+
+        for dev in devices:
+            profile = self._infer_profile(dev)
+            score = self._score_device(dev, profile, defaults)
+            if score > best_scores[profile]:
+                best_scores[profile] = score
+                best[profile] = dev
+
+        if best[self.PROFILE_COMPUTER_INPUT] is None:
+            default_in = defaults.get('input')
+            for dev in devices:
+                if dev['index'] == default_in:
+                    best[self.PROFILE_COMPUTER_INPUT] = dev
+                    break
+
+        if best[self.PROFILE_HEADSET_INPUT] is None and best[self.PROFILE_COMPUTER_INPUT] is not None:
+            # 没有耳机输入时，允许回落到电脑输入，避免 UI 出现不可用项
+            best[self.PROFILE_HEADSET_INPUT] = best[self.PROFILE_COMPUTER_INPUT]
+
+        return best
+
+    def list_preferred_input_options(self) -> List[Dict]:
+        """返回固定三类输入选项（UI 只展示这三类）"""
+        best = self.pick_preferred_devices()
+        profile_specs = [
+            (self.PROFILE_COMPUTER_INPUT, "电脑输入", "mic"),
+            (self.PROFILE_HEADSET_INPUT, "耳机输入", "mic"),
+            (self.PROFILE_COMPUTER_LOOPBACK, "电脑内录", "loopback"),
+        ]
+
+        options: List[Dict] = []
+        for profile, label, mode in profile_specs:
+            dev = best.get(profile)
+            options.append({
+                "profile": profile,
+                "label": label,
+                "mode": mode,
+                "available": dev is not None,
+                "index": None if dev is None else dev['index'],
+                "name": "" if dev is None else dev['name'],
+                "hostapi": "" if dev is None else dev['hostapi']
+            })
+        return options
+
     def _find_device(self) -> int:
         """根据模式自动选择设备"""
         if self.device_index is not None:
             return self.device_index
 
-        devices = self.list_devices()
+        preferred = self.pick_preferred_devices()
 
         if self.mode == "loopback":
-            # 优先选择 WASAPI loopback 设备
-            for dev in devices:
-                if dev['is_wasapi'] and dev['is_loopback']:
-                    logger.info(f"自动选择 loopback 设备: [{dev['index']}] {dev['name']}")
-                    return dev['index']
-            # 次选任何 loopback 设备
-            for dev in devices:
-                if dev['is_loopback']:
-                    logger.info(f"自动选择 loopback 设备: [{dev['index']}] {dev['name']}")
-                    return dev['index']
-            logger.warning("未找到 loopback 设备，使用默认输入")
+            dev = preferred.get(self.PROFILE_COMPUTER_LOOPBACK)
+            if dev:
+                logger.info(f"自动选择电脑内录设备: [{dev['index']}] {dev['name']}")
+                return dev['index']
+            logger.warning("未找到电脑内录设备，回落到系统默认输入")
+            return None
 
-        # mic 模式或未找到 loopback
-        return None  # 使用系统默认
+        # mic 模式优先电脑输入，再回落耳机输入
+        dev = preferred.get(self.PROFILE_COMPUTER_INPUT) or preferred.get(self.PROFILE_HEADSET_INPUT)
+        if dev:
+            logger.info(f"自动选择麦克风输入设备: [{dev['index']}] {dev['name']}")
+            return dev['index']
+        return None
 
     @staticmethod
     def _resample(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:

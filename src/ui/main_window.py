@@ -97,7 +97,8 @@ class PipelineWorker(QThread):
                     if vad_event.event_type == "start":
                         self.latency_logger.start_utterance()
                         self.latency_logger.log_capture(frame.timestamp)
-                        self.chunker.on_vad_start(vad_event.timestamp)
+                        pre_audio = self.audio_capture.get_pre_roll_audio()
+                        self.chunker.on_vad_start(vad_event.timestamp, pre_audio=pre_audio)
                         self.status_updated.emit("检测到语音...")
 
                     elif vad_event.event_type == "frame":
@@ -212,7 +213,8 @@ class MainWindow(QMainWindow):
             mode=audio_cfg.get("input_mode", "loopback"),
             device_index=audio_cfg.get("device_index"),
             sample_rate=16000,
-            frame_ms=20
+            frame_ms=20,
+            pre_roll_ms=config.get("audio", {}).get("pre_roll_ms", 400)
         )
 
         # VAD
@@ -224,10 +226,10 @@ class MainWindow(QMainWindow):
 
         # Chunker
         self.chunker = Chunker(
-            chunk_ms=chunker_cfg.get("chunk_ms", 1000),
-            overlap_ms=chunker_cfg.get("overlap_ms", 200),
+            chunk_ms=chunker_cfg.get("chunk_ms", 800),
+            overlap_ms=chunker_cfg.get("overlap_ms", 180),
             max_utterance_ms=chunker_cfg.get("max_utterance_ms", 10000),
-            tail_pad_ms=chunker_cfg.get("tail_pad_ms", 120)
+            tail_pad_ms=chunker_cfg.get("tail_pad_ms", 200)
         )
 
         # 队列
@@ -244,7 +246,7 @@ class MainWindow(QMainWindow):
             language=asr_cfg.get("language", "en"),
             device=asr_cfg.get("device", "cuda"),
             compute_type=asr_cfg.get("compute_type", "float16"),
-            beam_size=asr_cfg.get("beam_size", 1),
+            beam_size=asr_cfg.get("beam_size", 2),
             temperature=asr_cfg.get("temperature", 0.0)
         )
 
@@ -392,26 +394,65 @@ class MainWindow(QMainWindow):
 
     def refresh_devices(self):
         """刷新音频设备列表"""
+        self.combo_devices.blockSignals(True)
         self.combo_devices.clear()
-        devices = self.audio_capture.list_devices()
 
-        default_index = self.cm.get("audio").get("device_index")
-        current_idx = 0
+        options = self.audio_capture.list_preferred_input_options()
+        audio_cfg = self.cm.get("audio")
+        default_index = audio_cfg.get("device_index")
+        default_mode = audio_cfg.get("input_mode", "loopback")
 
-        for i, dev in enumerate(devices):
-            name = f"[{dev['index']}] {dev['name']} ({dev['hostapi']})"
-            self.combo_devices.addItem(name, dev['index'])
-            if default_index is not None and dev['index'] == default_index:
-                current_idx = i
+        selected_idx = -1
+        mode_matched_idx = -1
+        first_available_idx = -1
 
-        self.combo_devices.setCurrentIndex(current_idx)
+        for i, option in enumerate(options):
+            if option["available"]:
+                label = (
+                    f"{option['label']} - "
+                    f"[{option['index']}] {option['name']} ({option['hostapi']})"
+                )
+                data = {
+                    "index": option["index"],
+                    "mode": option["mode"],
+                    "profile": option["profile"]
+                }
+                if first_available_idx < 0:
+                    first_available_idx = i
+                if default_index is not None and option["index"] == default_index:
+                    selected_idx = i
+                if default_index is None and option["mode"] == default_mode and mode_matched_idx < 0:
+                    mode_matched_idx = i
+            else:
+                label = f"{option['label']}（未检测到）"
+                data = None
+
+            self.combo_devices.addItem(label, data)
+
+        if selected_idx < 0:
+            selected_idx = mode_matched_idx if mode_matched_idx >= 0 else first_available_idx
+        if selected_idx is None or selected_idx < 0:
+            selected_idx = 0
+
+        self.combo_devices.setCurrentIndex(selected_idx)
+        self.combo_devices.blockSignals(False)
+        self.save_audio_settings()
 
     def save_audio_settings(self):
         """保存音频设置"""
-        idx = self.combo_devices.currentData()
-        if idx is not None:
-            self.cm.set("audio", "device_index", idx)
-            self.audio_capture.device_index = idx
+        selected = self.combo_devices.currentData()
+        if not selected:
+            return
+
+        idx = selected.get("index")
+        mode = selected.get("mode", "mic")
+        if idx is None:
+            return
+
+        self.cm.set("audio", "device_index", idx)
+        self.cm.set("audio", "input_mode", mode)
+        self.audio_capture.device_index = idx
+        self.audio_capture.mode = mode
 
     def update_appearance(self):
         """更新外观设置"""

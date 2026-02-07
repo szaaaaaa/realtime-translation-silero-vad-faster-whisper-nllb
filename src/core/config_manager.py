@@ -6,6 +6,7 @@ import os
 
 DEFAULT_CONFIG = {
     "audio": {
+        "input_mode": "loopback",
         "device_index": None,
         "sample_rate": 16000
     },
